@@ -1,0 +1,3 @@
+{
+    "python.defaultInterpreterPath": ".local/share/mamba/envs/agentic/bin/python"
+}
