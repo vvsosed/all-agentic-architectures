@@ -31,3 +31,23 @@ python -m ipykernel install --user --name agentic --display-name "Python (agenti
 ```
 
 Then select "Python (agentic)" as the kernel in Cursor's notebook UI.
+
+### Inspecting and removing
+
+You can verify it's gone by listing installed kernels:
+
+```bash
+jupyter kernelspec list
+```
+
+To uninstall the Jupyter kernel, run:
+
+```bash
+jupyter kernelspec uninstall agentic
+```
+
+It will ask for confirmation before removing it. Add -y to skip the prompt:
+
+```bash
+jupyter kernelspec uninstall agentic -y
+```
