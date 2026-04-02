@@ -5,4 +5,8 @@ langchain-google-genai
 rich
 python-dotenv
 langchain-community
+langchain-neo4j
 langchain-tavily
+neo4j 
+faiss-cpu 
+tiktoken
