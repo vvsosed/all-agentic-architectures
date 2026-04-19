@@ -10,3 +10,4 @@ langchain-tavily
 neo4j 
 faiss-cpu 
 tiktoken
+streamlit

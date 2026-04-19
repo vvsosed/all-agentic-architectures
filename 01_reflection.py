@@ -1,7 +1,10 @@
-"""Agentic Architectures 1: Reflection.
+"""Agentic Architectures 1: Reflection (Streamlit UI).
 
 A reflective agent that generates an initial draft, critiques it, and refines
 the code based on the critique. Uses Google Gemini via LangChain and LangGraph.
+
+Run with:
+    streamlit run 01_reflection.py
 """
 
 import json
@@ -10,39 +13,17 @@ import time
 from typing import List, Optional, TypedDict
 
 import requests
+import streamlit as st
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.syntax import Syntax
 
 
 # --- API Key and Tracing Setup ---
 load_dotenv(override=True)
-
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGCHAIN_PROJECT"] = "Agentic Architecture - Reflection (Gemini)"
-
-api_key = os.getenv("GOOGLE_API_KEY")
-print(f"GOOGLE_API_KEY: {repr(api_key)}")
-print(f"LANGCHAIN_API_KEY: {repr(os.getenv('LANGCHAIN_API_KEY'))}")
-
-url = "https://generativelanguage.googleapis.com/v1beta/models"
-headers = {"X-goog-api-key": api_key}
-response = requests.get(url, headers=headers)
-print(response.json())
-
-if not os.environ.get("GOOGLE_API_KEY"):
-    print("GOOGLE_API_KEY not found. Please create a .env file and set it.")
-else:
-    print("GOOGLE_API_KEY found: ", os.environ.get("GOOGLE_API_KEY"))
-if not os.environ.get("LANGCHAIN_API_KEY"):
-    print("LANGCHAIN_API_KEY not found. Please create a .env file and set it for tracing.")
-else:
-    print("LANGCHAIN_API_KEY found: ", os.environ.get("LANGCHAIN_API_KEY"))
-
-print("Environment variables loaded and tracing is set up.")
 
 
 # --- Pydantic Schemas ---
@@ -88,13 +69,21 @@ class CodeEvaluation(BaseModel):
     justification: str = Field(description="A brief justification for the scores.")
 
 
-print("Pydantic models for Draft, Critique, and RefinedCode have been defined.")
+# --- Graph State ---
+class ReflectionState(TypedDict):
+    """Represents the state of our reflection graph."""
+
+    user_request: str
+    draft: Optional[dict]
+    critique: Optional[dict]
+    refined_code: Optional[dict]
 
 
-# --- LLM and Console ---
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview", temperature=0.2)
-console = Console()
-print("Gemini LLM and Console are initialized.")
+# --- LLM helpers ---
+@st.cache_resource(show_spinner=False)
+def get_llm() -> ChatGoogleGenerativeAI:
+    """Return a cached Gemini LLM client."""
+    return ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview", temperature=0.2)
 
 
 def _invoke_with_retry(structured_llm, prompt: str, max_attempts: int = 3):
@@ -113,10 +102,14 @@ def _invoke_with_retry(structured_llm, prompt: str, max_attempts: int = 3):
             if attempt >= max_attempts:
                 break
             wait = 2 * attempt
-            console.print(
-                f"[yellow]LLM call failed ({type(e).__name__}); "
-                f"retrying in {wait}s (attempt {attempt}/{max_attempts})...[/yellow]"
-            )
+            try:
+                st.toast(
+                    f"LLM call failed ({type(e).__name__}); "
+                    f"retrying in {wait}s (attempt {attempt}/{max_attempts})...",
+                    icon=":material/warning:",
+                )
+            except Exception:
+                pass
             time.sleep(wait)
     assert last_exc is not None
     raise last_exc
@@ -125,26 +118,20 @@ def _invoke_with_retry(structured_llm, prompt: str, max_attempts: int = 3):
 # --- Graph Nodes ---
 def generator_node(state):
     """Generates the initial draft of the code."""
-    console.print("--- 1. Generating Initial Draft ---")
-    generator_llm = llm.with_structured_output(DraftCode)
-
+    generator_llm = get_llm().with_structured_output(DraftCode)
     prompt = f"""You are an expert Python programmer. Write a Python function to solve the following request.
     Provide a simple, clear implementation and an explanation.
 
     Request: {state['user_request']}
     """
-
     draft = _invoke_with_retry(generator_llm, prompt)
     return {"draft": draft.model_dump()}
 
 
 def critic_node(state):
     """Critiques the generated code for errors and inefficiencies."""
-    console.print("--- 2. Critiquing Draft ---")
-    critic_llm = llm.with_structured_output(Critique)
-
+    critic_llm = get_llm().with_structured_output(Critique)
     code_to_critique = state["draft"]["code"]
-
     prompt = f"""You are an expert code reviewer and senior Python developer. Your task is to perform a thorough critique of the following code.
 
     Analyze the code for:
@@ -158,19 +145,15 @@ def critic_node(state):
     {code_to_critique}
     ```
     """
-
     critique = _invoke_with_retry(critic_llm, prompt)
     return {"critique": critique.model_dump()}
 
 
 def refiner_node(state):
     """Refines the code based on the critique."""
-    console.print("--- 3. Refining Code ---")
-    refiner_llm = llm.with_structured_output(RefinedCode)
-
+    refiner_llm = get_llm().with_structured_output(RefinedCode)
     draft_code = state["draft"]["code"]
     critique_suggestions = json.dumps(state["critique"], indent=2)
-
     prompt = f"""You are an expert Python programmer tasked with refining a piece of code based on a critique.
 
     Your goal is to rewrite the original code, implementing all the suggested improvements from the critique.
@@ -185,46 +168,29 @@ def refiner_node(state):
 
     Please provide the final, refined code and a summary of the changes you made.
     """
-
     refined_code = _invoke_with_retry(refiner_llm, prompt)
     return {"refined_code": refined_code.model_dump()}
 
 
-# --- Graph State ---
-class ReflectionState(TypedDict):
-    """Represents the state of our reflection graph."""
-
-    user_request: str
-    draft: Optional[dict]
-    critique: Optional[dict]
-    refined_code: Optional[dict]
-
-
-print("ReflectionState TypedDict defined.")
-
-
 # --- Build the Graph ---
-graph_builder = StateGraph(ReflectionState)
-
-graph_builder.add_node("generator", generator_node)
-graph_builder.add_node("critic", critic_node)
-graph_builder.add_node("refiner", refiner_node)
-
-graph_builder.set_entry_point("generator")
-graph_builder.add_edge("generator", "critic")
-graph_builder.add_edge("critic", "refiner")
-graph_builder.add_edge("refiner", END)
-
-reflection_app = graph_builder.compile()
-print("Reflection graph compiled successfully!")
+@st.cache_resource(show_spinner=False)
+def build_graph():
+    """Compile and cache the reflection LangGraph."""
+    graph_builder = StateGraph(ReflectionState)
+    graph_builder.add_node("generator", generator_node)
+    graph_builder.add_node("critic", critic_node)
+    graph_builder.add_node("refiner", refiner_node)
+    graph_builder.set_entry_point("generator")
+    graph_builder.add_edge("generator", "critic")
+    graph_builder.add_edge("critic", "refiner")
+    graph_builder.add_edge("refiner", END)
+    return graph_builder.compile()
 
 
 # --- Evaluation Helper ---
-judge_llm = llm.with_structured_output(CodeEvaluation)
-
-
-def evaluate_code(code_to_evaluate: str):
+def evaluate_code(code_to_evaluate: str) -> CodeEvaluation:
     """Use an LLM-as-a-judge to score the given code."""
+    judge_llm = get_llm().with_structured_output(CodeEvaluation)
     prompt = f"""You are an expert judge of Python code. Evaluate the following function on a scale of 1-10 for correctness, efficiency, and style. Provide a brief justification.
 
     Code:
@@ -235,68 +201,162 @@ def evaluate_code(code_to_evaluate: str):
     return judge_llm.invoke(prompt)
 
 
-def main():
-    """Run the reflection workflow end-to-end and print the results."""
-    user_request = """You have this URL:
-https://generativelanguage.googleapis.com/v1beta/models" -H "X-goog-api-key: $GOOGLE_API_KEY"
-Give me a code that will make a request to this URL and print the response.
-"""
-    initial_input : ReflectionState = {"user_request": user_request}
+# --- UI Helpers ---
+def render_environment_sidebar() -> None:
+    """Render API key / environment diagnostics in the sidebar."""
+    st.sidebar.header("Environment")
 
-    console.print(
-        f"[bold cyan]🚀 Kicking off Reflection workflow for request:[/bold cyan] '{user_request}'\n"
+    google_key = os.getenv("GOOGLE_API_KEY")
+    langchain_key = os.getenv("LANGCHAIN_API_KEY")
+
+    if google_key:
+        st.sidebar.success("GOOGLE_API_KEY loaded")
+    else:
+        st.sidebar.error("GOOGLE_API_KEY not found. Add it to your .env file.")
+
+    if langchain_key:
+        st.sidebar.success("LANGCHAIN_API_KEY loaded (tracing enabled)")
+    else:
+        st.sidebar.info("LANGCHAIN_API_KEY not set (tracing disabled)")
+
+    with st.sidebar.expander("Available Gemini models", expanded=False):
+        if not google_key:
+            st.write("Set GOOGLE_API_KEY to fetch the model list.")
+            return
+        try:
+            response = requests.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                headers={"X-goog-api-key": google_key},
+                timeout=10,
+            )
+            st.json(response.json())
+        except Exception as exc:
+            st.warning(f"Could not fetch models: {exc}")
+
+
+def render_evaluation(label: str, evaluation: CodeEvaluation) -> None:
+    """Render a CodeEvaluation block as Streamlit metrics."""
+    st.subheader(label)
+    cols = st.columns(3)
+    cols[0].metric("Correctness", f"{evaluation.correctness_score}/10")
+    cols[1].metric("Efficiency", f"{evaluation.efficiency_score}/10")
+    cols[2].metric("Style", f"{evaluation.style_score}/10")
+    st.write(evaluation.justification)
+
+
+def render_results(final_state: ReflectionState) -> None:
+    """Render the final draft, critique, refined code, and evaluations."""
+    draft = final_state["draft"]
+    critique = final_state["critique"]
+    refined = final_state["refined_code"]
+
+    st.header("1. Initial Draft")
+    st.markdown(f"**Explanation:** {draft['explanation']}")
+    st.code(draft["code"], language="python")
+
+    st.header("2. Critique")
+    st.markdown(f"**Summary:** {critique['critique_summary']}")
+    badge_cols = st.columns(2)
+    badge_cols[0].markdown(
+        f"**Has errors:** {'Yes' if critique['has_errors'] else 'No'}"
+    )
+    badge_cols[1].markdown(
+        f"**Efficient:** {'Yes' if critique['is_efficient'] else 'No'}"
+    )
+    st.markdown("**Suggested improvements:**")
+    for improvement in critique["suggested_improvements"]:
+        st.markdown(f"- {improvement}")
+
+    st.header("3. Final Refined Code")
+    st.markdown(f"**Refinement Summary:** {refined['refinement_summary']}")
+    st.code(refined["refined_code"], language="python")
+
+    st.header("4. LLM-as-Judge Evaluation")
+    with st.spinner("Evaluating initial draft..."):
+        initial_eval = evaluate_code(draft["code"])
+    render_evaluation("Initial draft", initial_eval)
+
+    with st.spinner("Evaluating refined code..."):
+        refined_eval = evaluate_code(refined["refined_code"])
+    render_evaluation("Refined code", refined_eval)
+
+
+# --- Main Streamlit App ---
+def main() -> None:
+    """Streamlit entry point for the reflection workflow."""
+    st.set_page_config(
+        page_title="Agentic Architectures: Reflection",
+        page_icon=":brain:",
+        layout="wide",
+    )
+    st.title("Agentic Architectures: Reflection")
+    st.caption("Generate a draft, critique it, and refine the code — powered by Gemini + LangGraph.")
+
+    render_environment_sidebar()
+
+    default_request = "Write a function that prints \"Hello, world!\""
+    user_request = st.text_area(
+        "What should the agent build?",
+        value=default_request,
+        height=160,
     )
 
-    final_state : Optional[ReflectionState] = None
-    for state_update in reflection_app.stream(initial_input, stream_mode="values"):
-        final_state = state_update
+    run = st.button("Run reflection workflow", type="primary", use_container_width=True)
+    if not run:
+        st.info("Enter a request above and click **Run reflection workflow** to start.")
+        return
 
-    console.print("\n[bold green]✅ Reflection workflow complete![/bold green]")
+    if not os.getenv("GOOGLE_API_KEY"):
+        st.error("GOOGLE_API_KEY is not set. Add it to your .env file and reload.")
+        return
+
+    reflection_app = build_graph()
+
+    final_state: Optional[ReflectionState] = None
+    step_labels = {
+        "generator": "Generating initial draft",
+        "critic": "Critiquing draft",
+        "refiner": "Refining code",
+    }
+
+    with st.status("Running reflection workflow...", expanded=True) as status:
+        status.write(f"**Request:** {user_request}")
+        initial_input: ReflectionState = {
+            "user_request": user_request,
+            "draft": None,
+            "critique": None,
+            "refined_code": None,
+        }
+
+        seen_keys: set[str] = set()
+        try:
+            for state_update in reflection_app.stream(initial_input, stream_mode="values"):
+                final_state = state_update
+                for key, label in step_labels.items():
+                    produced = {
+                        "generator": "draft",
+                        "critic": "critique",
+                        "refiner": "refined_code",
+                    }[key]
+                    if state_update.get(produced) and key not in seen_keys:
+                        seen_keys.add(key)
+                        status.write(f":white_check_mark: {label}")
+        except Exception as exc:
+            status.update(label="Reflection workflow failed", state="error")
+            st.exception(exc)
+            return
+
+        status.update(label="Reflection workflow complete", state="complete")
 
     if (
         final_state
-        and "draft" in final_state
-        and "critique" in final_state
-        and "refined_code" in final_state
+        and final_state.get("draft")
+        and final_state.get("critique")
+        and final_state.get("refined_code")
     ):
-        console.print(Markdown("--- ### Initial Draft ---"))
-        console.print(Markdown(f"**Explanation:** {final_state['draft']['explanation']}"))
-        console.print(
-            Syntax(final_state["draft"]["code"], "python", theme="monokai", line_numbers=True)
-        )
-
-        console.print(Markdown("\n--- ### Critique ---"))
-        console.print(Markdown(f"**Summary:** {final_state['critique']['critique_summary']}"))
-        console.print(Markdown("**Improvements Suggested:**"))
-        for improvement in final_state["critique"]["suggested_improvements"]:
-            console.print(Markdown(f"- {improvement}"))
-
-        console.print(Markdown("\n--- ### Final Refined Code ---"))
-        console.print(
-            Markdown(
-                f"**Refinement Summary:** {final_state['refined_code']['refinement_summary']}"
-            )
-        )
-        console.print(
-            Syntax(
-                final_state["refined_code"]["refined_code"],
-                "python",
-                theme="monokai",
-                line_numbers=True,
-            )
-        )
-
-        console.print("--- Evaluating Initial Draft ---")
-        initial_draft_evaluation = evaluate_code(final_state["draft"]["code"])
-        console.print(initial_draft_evaluation.model_dump())
-
-        console.print("\n--- Evaluating Refined Code ---")
-        refined_code_evaluation = evaluate_code(final_state["refined_code"]["refined_code"])
-        console.print(refined_code_evaluation.model_dump())
+        render_results(final_state)
     else:
-        console.print(
-            "[bold red]Error: The `final_state` is not available or is incomplete.[/bold red]"
-        )
+        st.error("The workflow did not produce a complete result.")
 
 
 if __name__ == "__main__":
