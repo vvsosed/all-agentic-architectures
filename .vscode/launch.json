@@ -1,0 +1,36 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File (agentic)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "/home/vvsosed/.local/share/mamba/envs/agentic/bin/python",
+            "justMyCode": false,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        },
+        {
+            "name": "Python: Module (agentic)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "${input:moduleName}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "python": "/home/vvsosed/.local/share/mamba/envs/agentic/bin/python",
+            "justMyCode": false
+        }
+    ],
+    "inputs": [
+        {
+            "id": "moduleName",
+            "type": "promptString",
+            "description": "Python module to run (e.g. mypkg.main)",
+            "default": ""
+        }
+    ]
+}
