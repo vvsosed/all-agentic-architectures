@@ -21,8 +21,30 @@ import time
 import uuid
 from typing import List, Optional, TypedDict
 
+# Silence GTK's accessibility-bridge noise on Linux.
+#
+# Flet renders via Flutter's Linux desktop embedder, which pulls in GTK. On
+# startup GTK tries to hook the window into the AT-SPI (Assistive Technology
+# Service Provider Interface) bus. If no accessibility bus is available in
+# the current session (common on minimal WMs, headless runs, or plain SSH
+# shells), GTK prints:
+#
+#     (flet:12345): Atk-CRITICAL **: atk_socket_embed:
+#                   assertion 'plug_id != NULL' failed
+#
+# Setting NO_AT_BRIDGE=1 is the upstream-documented way to skip the AT-SPI
+# bridge entirely. It does NOT affect actual screen-reader/assistive tools
+# when they ARE running (they use a different code path). `setdefault` is
+# used so the user can still opt back in by exporting NO_AT_BRIDGE=0.
 os.environ.setdefault("NO_AT_BRIDGE", "1")
-# Optional: route GTK warnings to a log file Flutter uses for diagnostics
+
+# Silence non-critical GLib debug chatter from GTK/Flutter on Linux.
+#
+# GLib emits messages at several levels; when G_MESSAGES_DEBUG is unset,
+# GTK libs decide ad-hoc what to print. Forcing it to an empty string
+# disables all debug-domain messages while still letting real warnings
+# and critical errors through. Again, `setdefault` preserves any value
+# the user may have set explicitly.
 os.environ.setdefault("G_MESSAGES_DEBUG", "")
 
 import flet as ft
