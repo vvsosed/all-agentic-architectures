@@ -11,3 +11,4 @@ neo4j
 faiss-cpu 
 tiktoken
 streamlit
+flet
