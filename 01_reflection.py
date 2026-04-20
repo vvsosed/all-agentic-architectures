@@ -1,7 +1,11 @@
-"""Agentic Architectures 1: Reflection (Streamlit UI).
+"""Agentic Architectures 1: Reflection (Streamlit chatbot UI).
 
 A reflective agent that generates an initial draft, critiques it, and refines
 the code based on the critique. Uses Google Gemini via LangChain and LangGraph.
+
+The UI is laid out as a "belt": each completed reflection workflow is appended
+as a sealed panel, and a fresh input slot is rendered at the end of the belt
+so the user can submit the next request without losing previous results.
 
 Run with:
     streamlit run 01_reflection.py
@@ -10,6 +14,7 @@ Run with:
 import json
 import os
 import time
+import uuid
 from typing import List, Optional, TypedDict
 
 import requests
@@ -219,6 +224,15 @@ def render_environment_sidebar() -> None:
     else:
         st.sidebar.info("LANGCHAIN_API_KEY not set (tracing disabled)")
 
+    st.sidebar.divider()
+    st.sidebar.header("Belt")
+    turns = st.session_state.get("turns", [])
+    completed = sum(1 for t in turns if t.get("status") == "complete")
+    st.sidebar.write(f"Completed runs on belt: **{completed}**")
+    if turns and st.sidebar.button("Clear belt", use_container_width=True):
+        st.session_state["turns"] = []
+        st.rerun()
+
     with st.sidebar.expander("Available Gemini models", expanded=False):
         if not google_key:
             st.write("Set GOOGLE_API_KEY to fetch the model list.")
@@ -234,129 +248,197 @@ def render_environment_sidebar() -> None:
             st.warning(f"Could not fetch models: {exc}")
 
 
-def render_evaluation(label: str, evaluation: CodeEvaluation) -> None:
-    """Render a CodeEvaluation block as Streamlit metrics."""
+def _render_evaluation(label: str, evaluation: dict) -> None:
+    """Render a CodeEvaluation dict as Streamlit metrics."""
     st.subheader(label)
     cols = st.columns(3)
-    cols[0].metric("Correctness", f"{evaluation.correctness_score}/10")
-    cols[1].metric("Efficiency", f"{evaluation.efficiency_score}/10")
-    cols[2].metric("Style", f"{evaluation.style_score}/10")
-    st.write(evaluation.justification)
+    cols[0].metric("Correctness", f"{evaluation['correctness_score']}/10")
+    cols[1].metric("Efficiency", f"{evaluation['efficiency_score']}/10")
+    cols[2].metric("Style", f"{evaluation['style_score']}/10")
+    st.write(evaluation["justification"])
 
 
-def render_results(final_state: ReflectionState) -> None:
-    """Render the final draft, critique, refined code, and evaluations."""
+def _render_completed_turn(index: int, turn: dict) -> None:
+    """Render a single completed reflection run as a sealed belt panel."""
+    request = turn["user_request"]
+    final_state = turn["final_state"]
     draft = final_state["draft"]
     critique = final_state["critique"]
     refined = final_state["refined_code"]
 
-    st.header("1. Initial Draft")
-    st.markdown(f"**Explanation:** {draft['explanation']}")
-    st.code(draft["code"], language="python")
+    with st.container(border=True):
+        st.markdown(f"### Run #{index + 1}")
+        with st.chat_message("user"):
+            st.markdown(request)
 
-    st.header("2. Critique")
-    st.markdown(f"**Summary:** {critique['critique_summary']}")
-    badge_cols = st.columns(2)
-    badge_cols[0].markdown(
-        f"**Has errors:** {'Yes' if critique['has_errors'] else 'No'}"
+        with st.chat_message("assistant"):
+            tab_draft, tab_critique, tab_refined, tab_eval = st.tabs(
+                ["1. Draft", "2. Critique", "3. Refined", "4. Evaluation"]
+            )
+
+            with tab_draft:
+                st.markdown(f"**Explanation:** {draft['explanation']}")
+                st.code(draft["code"], language="python")
+
+            with tab_critique:
+                st.markdown(f"**Summary:** {critique['critique_summary']}")
+                badge_cols = st.columns(2)
+                badge_cols[0].markdown(
+                    f"**Has errors:** {'Yes' if critique['has_errors'] else 'No'}"
+                )
+                badge_cols[1].markdown(
+                    f"**Efficient:** {'Yes' if critique['is_efficient'] else 'No'}"
+                )
+                st.markdown("**Suggested improvements:**")
+                for improvement in critique["suggested_improvements"]:
+                    st.markdown(f"- {improvement}")
+
+            with tab_refined:
+                st.markdown(f"**Refinement Summary:** {refined['refinement_summary']}")
+                st.code(refined["refined_code"], language="python")
+
+            with tab_eval:
+                _render_evaluation("Initial draft", turn["initial_eval"])
+                st.divider()
+                _render_evaluation("Refined code", turn["refined_eval"])
+
+
+def _render_failed_turn(index: int, turn: dict) -> None:
+    """Render a turn that failed during the reflection workflow."""
+    with st.container(border=True):
+        st.markdown(f"### Run #{index + 1}")
+        with st.chat_message("user"):
+            st.markdown(turn["user_request"])
+        with st.chat_message("assistant"):
+            st.error(turn.get("error", "The workflow did not produce a complete result."))
+
+
+def _process_turn(turn: dict) -> None:
+    """Run the reflection workflow for the pending turn and update it in place."""
+    reflection_app = build_graph()
+
+    step_labels = {
+        "generator": "Generating initial draft",
+        "critic": "Critiquing draft",
+        "refiner": "Refining code",
+    }
+    produced_by = {
+        "generator": "draft",
+        "critic": "critique",
+        "refiner": "refined_code",
+    }
+
+    initial_input: ReflectionState = {
+        "user_request": turn["user_request"],
+        "draft": None,
+        "critique": None,
+        "refined_code": None,
+    }
+
+    final_state: Optional[ReflectionState] = None
+    with st.status("Running reflection workflow...", expanded=True) as status:
+        status.write(f"**Request:** {turn['user_request']}")
+        seen_keys: set[str] = set()
+        try:
+            for state_update in reflection_app.stream(initial_input, stream_mode="values"):
+                final_state = state_update
+                for key, label in step_labels.items():
+                    if state_update.get(produced_by[key]) and key not in seen_keys:
+                        seen_keys.add(key)
+                        status.write(f":white_check_mark: {label}")
+        except Exception as exc:
+            status.update(label="Reflection workflow failed", state="error")
+            st.exception(exc)
+            turn["status"] = "failed"
+            turn["error"] = f"{type(exc).__name__}: {exc}"
+            return
+
+        if not (
+            final_state
+            and final_state.get("draft")
+            and final_state.get("critique")
+            and final_state.get("refined_code")
+        ):
+            status.update(label="Reflection workflow incomplete", state="error")
+            turn["status"] = "failed"
+            turn["error"] = "The workflow did not produce a complete result."
+            return
+
+        status.write(":hourglass_flowing_sand: Evaluating initial draft...")
+        initial_eval = evaluate_code(final_state["draft"]["code"])
+        status.write(":hourglass_flowing_sand: Evaluating refined code...")
+        refined_eval = evaluate_code(final_state["refined_code"]["refined_code"])
+
+        status.update(label="Reflection workflow complete", state="complete")
+
+    turn["final_state"] = final_state
+    turn["initial_eval"] = initial_eval.model_dump()
+    turn["refined_eval"] = refined_eval.model_dump()
+    turn["status"] = "complete"
+
+
+def _render_input_slot() -> None:
+    """Render the trailing input slot at the end of the belt."""
+    next_index = len(st.session_state["turns"])
+    placeholder = (
+        "What should the agent build?"
+        if next_index == 0
+        else "Send another request to the agent..."
     )
-    badge_cols[1].markdown(
-        f"**Efficient:** {'Yes' if critique['is_efficient'] else 'No'}"
-    )
-    st.markdown("**Suggested improvements:**")
-    for improvement in critique["suggested_improvements"]:
-        st.markdown(f"- {improvement}")
-
-    st.header("3. Final Refined Code")
-    st.markdown(f"**Refinement Summary:** {refined['refinement_summary']}")
-    st.code(refined["refined_code"], language="python")
-
-    st.header("4. LLM-as-Judge Evaluation")
-    with st.spinner("Evaluating initial draft..."):
-        initial_eval = evaluate_code(draft["code"])
-    render_evaluation("Initial draft", initial_eval)
-
-    with st.spinner("Evaluating refined code..."):
-        refined_eval = evaluate_code(refined["refined_code"])
-    render_evaluation("Refined code", refined_eval)
+    user_request = st.chat_input(placeholder=placeholder)
+    if user_request:
+        st.session_state["turns"].append(
+            {
+                "id": uuid.uuid4().hex,
+                "user_request": user_request,
+                "status": "pending",
+            }
+        )
+        st.rerun()
 
 
 # --- Main Streamlit App ---
 def main() -> None:
-    """Streamlit entry point for the reflection workflow."""
+    """Streamlit entry point for the reflection chatbot."""
     st.set_page_config(
         page_title="Agentic Architectures: Reflection",
         page_icon=":brain:",
         layout="wide",
     )
     st.title("Agentic Architectures: Reflection")
-    st.caption("Generate a draft, critique it, and refine the code — powered by Gemini + LangGraph.")
-
-    render_environment_sidebar()
-
-    default_request = "Write a function that prints \"Hello, world!\""
-    user_request = st.text_area(
-        "What should the agent build?",
-        value=default_request,
-        height=160,
+    st.caption(
+        "Each request becomes a sealed panel on the belt — generate, critique, refine. "
+        "Powered by Gemini + LangGraph."
     )
 
-    run = st.button("Run reflection workflow", type="primary", use_container_width=True)
-    if not run:
-        st.info("Enter a request above and click **Run reflection workflow** to start.")
-        return
+    if "turns" not in st.session_state:
+        st.session_state["turns"] = []
+
+    render_environment_sidebar()
 
     if not os.getenv("GOOGLE_API_KEY"):
         st.error("GOOGLE_API_KEY is not set. Add it to your .env file and reload.")
         return
 
-    reflection_app = build_graph()
+    if not st.session_state["turns"]:
+        st.info("Send a request below to start the reflection belt.")
 
-    final_state: Optional[ReflectionState] = None
-    step_labels = {
-        "generator": "Generating initial draft",
-        "critic": "Critiquing draft",
-        "refiner": "Refining code",
-    }
+    for index, turn in enumerate(st.session_state["turns"]):
+        status = turn.get("status")
+        if status == "complete":
+            _render_completed_turn(index, turn)
+        elif status == "failed":
+            _render_failed_turn(index, turn)
+        else:
+            with st.container(border=True):
+                st.markdown(f"### Run #{index + 1}")
+                with st.chat_message("user"):
+                    st.markdown(turn["user_request"])
+                with st.chat_message("assistant"):
+                    _process_turn(turn)
+            st.rerun()
 
-    with st.status("Running reflection workflow...", expanded=True) as status:
-        status.write(f"**Request:** {user_request}")
-        initial_input: ReflectionState = {
-            "user_request": user_request,
-            "draft": None,
-            "critique": None,
-            "refined_code": None,
-        }
-
-        seen_keys: set[str] = set()
-        try:
-            for state_update in reflection_app.stream(initial_input, stream_mode="values"):
-                final_state = state_update
-                for key, label in step_labels.items():
-                    produced = {
-                        "generator": "draft",
-                        "critic": "critique",
-                        "refiner": "refined_code",
-                    }[key]
-                    if state_update.get(produced) and key not in seen_keys:
-                        seen_keys.add(key)
-                        status.write(f":white_check_mark: {label}")
-        except Exception as exc:
-            status.update(label="Reflection workflow failed", state="error")
-            st.exception(exc)
-            return
-
-        status.update(label="Reflection workflow complete", state="complete")
-
-    if (
-        final_state
-        and final_state.get("draft")
-        and final_state.get("critique")
-        and final_state.get("refined_code")
-    ):
-        render_results(final_state)
-    else:
-        st.error("The workflow did not produce a complete result.")
+    _render_input_slot()
 
 
 if __name__ == "__main__":
