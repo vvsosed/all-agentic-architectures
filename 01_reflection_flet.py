@@ -826,22 +826,54 @@ async def main(page: ft.Page):
         border=ft.Border.only(top=ft.BorderSide(1, ft.Colors.OUTLINE_VARIANT)),
     )
 
+    sidebar_container = ft.Container(
+        content=sidebar,
+        width=300,
+        padding=15,
+        bgcolor=ft.Colors.with_opacity(0.04, ft.Colors.ON_SURFACE),
+    )
+    sidebar_divider = ft.VerticalDivider(width=1)
+
+    sidebar_toggle_btn = ft.IconButton(
+        icon=ft.Icons.MENU_OPEN,
+        tooltip="Hide sidebar",
+        icon_size=22,
+    )
+
+    def toggle_sidebar(_=None):
+        new_visible = not sidebar_container.visible
+        sidebar_container.visible = new_visible
+        sidebar_divider.visible = new_visible
+        sidebar_toggle_btn.icon = ft.Icons.MENU_OPEN if new_visible else ft.Icons.MENU
+        sidebar_toggle_btn.tooltip = "Hide sidebar" if new_visible else "Show sidebar"
+        page.update()
+
+    sidebar_toggle_btn.on_click = toggle_sidebar
+
     header = ft.Container(
-        content=ft.Column(
+        content=ft.Row(
             controls=[
-                ft.Text(
-                    "Agentic Architectures: Reflection",
-                    size=22,
-                    weight=ft.FontWeight.BOLD,
-                ),
-                ft.Text(
-                    "Each request becomes a sealed panel on the belt — generate, "
-                    "critique, refine. Powered by Gemini + LangGraph.",
-                    italic=True,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
+                sidebar_toggle_btn,
+                ft.Column(
+                    controls=[
+                        ft.Text(
+                            "Agentic Architectures: Reflection",
+                            size=22,
+                            weight=ft.FontWeight.BOLD,
+                        ),
+                        ft.Text(
+                            "Each request becomes a sealed panel on the belt — generate, "
+                            "critique, refine. Powered by Gemini + LangGraph.",
+                            italic=True,
+                            color=ft.Colors.ON_SURFACE_VARIANT,
+                        ),
+                    ],
+                    spacing=4,
+                    expand=True,
                 ),
             ],
-            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=8,
         ),
         padding=ft.Padding.only(left=15, right=15, top=15, bottom=5),
     )
@@ -856,18 +888,11 @@ async def main(page: ft.Page):
         spacing=0,
     )
 
-    sidebar_container = ft.Container(
-        content=sidebar,
-        width=300,
-        padding=15,
-        bgcolor=ft.Colors.with_opacity(0.04, ft.Colors.ON_SURFACE),
-    )
-
     page.add(
         ft.Row(
             controls=[
                 sidebar_container,
-                ft.VerticalDivider(width=1),
+                sidebar_divider,
                 ft.Container(content=main_area, expand=True),
             ],
             expand=True,
