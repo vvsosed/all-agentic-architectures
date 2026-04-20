@@ -213,32 +213,50 @@ def evaluate_code(code_to_evaluate: str) -> CodeEvaluation:
 
 
 # --- UI Building Blocks ---
-CODE_THEME = "atom-one-dark"
 MD_EXT = ft.MarkdownExtensionSet.GITHUB_FLAVORED
 
+# Paired light/dark highlight themes. Kept in one place so they are easy to
+# swap (e.g. NIGHT_OWL + GITHUB, DRACULA + ATOM_ONE_LIGHT, ...).
+DARK_CODE_THEME = ft.MarkdownCodeTheme.ATOM_ONE_DARK
+LIGHT_CODE_THEME = ft.MarkdownCodeTheme.GITHUB
 
-def _md(text: str) -> ft.Markdown:
+
+def _is_dark_mode(page: ft.Page) -> bool:
+    """Return True if the app is effectively rendering in dark mode."""
+    if page.theme_mode == ft.ThemeMode.DARK:
+        return True
+    if page.theme_mode == ft.ThemeMode.LIGHT:
+        return False
+    return page.platform_brightness == ft.Brightness.DARK
+
+
+def _pick_code_theme(page: ft.Page) -> ft.MarkdownCodeTheme:
+    """Choose a highlight theme whose background matches the app theme."""
+    return DARK_CODE_THEME if _is_dark_mode(page) else LIGHT_CODE_THEME
+
+
+def _md(page: ft.Page, text: str) -> ft.Markdown:
     """Render markdown with code-block syntax highlighting."""
     return ft.Markdown(
         text,
         selectable=True,
         extension_set=MD_EXT,
-        code_theme=CODE_THEME,
+        code_theme=_pick_code_theme(page),
     )
 
 
-def _code_block(code: str, language: str = "python") -> ft.Markdown:
+def _code_block(page: ft.Page, code: str, language: str = "python") -> ft.Markdown:
     """Render a fenced code block."""
-    return _md(f"```{language}\n{code}\n```")
+    return _md(page, f"```{language}\n{code}\n```")
 
 
-def _user_bubble(text: str) -> ft.Container:
+def _user_bubble(page: ft.Page, text: str) -> ft.Container:
     """Render the user's request as a chat bubble."""
     return ft.Container(
         content=ft.Row(
             controls=[
                 ft.Icon(ft.Icons.PERSON, size=18),
-                ft.Container(content=_md(text), expand=True),
+                ft.Container(content=_md(page, text), expand=True),
             ],
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),
@@ -294,7 +312,7 @@ def _evaluation_block(label: str, evaluation: dict) -> ft.Column:
     )
 
 
-def _build_completed_card(index: int, turn: dict) -> ft.Card:
+def _build_completed_card(page: ft.Page, index: int, turn: dict) -> ft.Card:
     """Render a single completed reflection run as a sealed belt panel."""
     request = turn["user_request"]
     final_state = turn["final_state"]
@@ -304,30 +322,30 @@ def _build_completed_card(index: int, turn: dict) -> ft.Card:
 
     draft_tab = _scrollable_tab_body(
         [
-            _md(f"**Explanation:** {draft['explanation']}"),
-            _code_block(draft["code"]),
+            _md(page, f"**Explanation:** {draft['explanation']}"),
+            _code_block(page, draft["code"]),
         ]
     )
 
     suggestions_md = "\n".join(f"- {s}" for s in critique["suggested_improvements"])
     critique_tab = _scrollable_tab_body(
         [
-            _md(f"**Summary:** {critique['critique_summary']}"),
+            _md(page, f"**Summary:** {critique['critique_summary']}"),
             ft.Row(
                 controls=[
-                    _md(f"**Has errors:** {'Yes' if critique['has_errors'] else 'No'}"),
-                    _md(f"**Efficient:** {'Yes' if critique['is_efficient'] else 'No'}"),
+                    _md(page, f"**Has errors:** {'Yes' if critique['has_errors'] else 'No'}"),
+                    _md(page, f"**Efficient:** {'Yes' if critique['is_efficient'] else 'No'}"),
                 ],
                 spacing=20,
             ),
-            _md("**Suggested improvements:**\n" + suggestions_md),
+            _md(page, "**Suggested improvements:**\n" + suggestions_md),
         ]
     )
 
     refined_tab = _scrollable_tab_body(
         [
-            _md(f"**Refinement Summary:** {refined['refinement_summary']}"),
-            _code_block(refined["refined_code"]),
+            _md(page, f"**Refinement Summary:** {refined['refinement_summary']}"),
+            _code_block(page, refined["refined_code"]),
         ]
     )
 
@@ -362,7 +380,7 @@ def _build_completed_card(index: int, turn: dict) -> ft.Card:
             content=ft.Column(
                 controls=[
                     ft.Text(f"Run #{index + 1}", weight=ft.FontWeight.BOLD, size=18),
-                    _user_bubble(request),
+                    _user_bubble(page, request),
                     ft.Container(content=tabs, height=520),
                 ],
                 spacing=10,
@@ -372,14 +390,14 @@ def _build_completed_card(index: int, turn: dict) -> ft.Card:
     )
 
 
-def _build_failed_card(index: int, turn: dict) -> ft.Card:
+def _build_failed_card(page: ft.Page, index: int, turn: dict) -> ft.Card:
     """Render a turn that failed during the reflection workflow."""
     return ft.Card(
         content=ft.Container(
             content=ft.Column(
                 controls=[
                     ft.Text(f"Run #{index + 1}", weight=ft.FontWeight.BOLD, size=18),
-                    _user_bubble(turn["user_request"]),
+                    _user_bubble(page, turn["user_request"]),
                     ft.Container(
                         content=ft.Row(
                             controls=[
@@ -736,7 +754,7 @@ async def main(page: ft.Page):
                             weight=ft.FontWeight.BOLD,
                             size=18,
                         ),
-                        _user_bubble(text),
+                        _user_bubble(page, text),
                         status_column,
                     ],
                     spacing=10,
@@ -756,12 +774,12 @@ async def main(page: ft.Page):
             turn["refined_eval"] = refined_eval
             turn["status"] = "complete"
             idx = belt.controls.index(pending_card)
-            belt.controls[idx] = _build_completed_card(index, turn)
+            belt.controls[idx] = _build_completed_card(page, index, turn)
         except Exception as exc:
             turn["status"] = "failed"
             turn["error"] = f"{type(exc).__name__}: {exc}"
             idx = belt.controls.index(pending_card)
-            belt.controls[idx] = _build_failed_card(index, turn)
+            belt.controls[idx] = _build_failed_card(page, index, turn)
         finally:
             sidebar.completed_label.value = _completed_label_text(turns)  # type: ignore[attr-defined]
             input_field.disabled = False
