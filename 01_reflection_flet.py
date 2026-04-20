@@ -60,6 +60,9 @@ load_dotenv(override=True)
 os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGCHAIN_PROJECT"] = "Agentic Architecture - Reflection (Gemini)"
 
+LLM_MODEL: str = "gemini-3.1-flash-lite-preview"
+LLM_TEMPERATURE: float = 0.2
+
 
 # --- Pydantic Schemas ---
 class DraftCode(BaseModel):
@@ -123,7 +126,7 @@ def get_llm() -> ChatGoogleGenerativeAI:
     global _LLM
     if _LLM is None:
         _LLM = ChatGoogleGenerativeAI(
-            model="gemini-3.1-flash-lite-preview", temperature=0.2
+            model=LLM_MODEL, temperature=LLM_TEMPERATURE
         )
     return _LLM
 
