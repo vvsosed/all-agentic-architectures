@@ -847,6 +847,7 @@ async def main(page: ft.Page):
             ],
             expand=True,
             spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
     )
 
