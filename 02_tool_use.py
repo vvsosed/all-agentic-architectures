@@ -23,9 +23,10 @@ Required environment variables (loaded from a local .env file if present):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
-from typing import Annotated, List, Optional, TypedDict
+from typing import Annotated, Any, List, Optional, TypedDict
 
 from dotenv import load_dotenv
 from langchain_community.tools.tavily_search import TavilySearchResults
@@ -34,10 +35,12 @@ from langgraph.graph import StateGraph
 from langgraph.graph.message import AnyMessage, add_messages
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
-from rich.console import Console
-from rich.markdown import Markdown, Json
+from rich.console import Console, Group
+from rich.json import JSON
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.text import Text
 
 console = Console()
 
@@ -135,34 +138,102 @@ def _message_title(message) -> str:
     return f"{cls} ({getattr(message, 'type', '?')})"
 
 
-def print_message(message) -> None:
-    """Render a LangChain message to the console."""
-    title = _message_title(message)
-    body_parts: List[str] = []
+def _normalize_content(content: Any) -> str:
+    """Flatten LangChain message content (str or list of blocks) into plain text."""
+    if isinstance(content, list):
+        return "\n".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return "" if content is None else str(content)
 
-    content = getattr(message, "content", "")
-    if content:
-        if isinstance(content, list):
-            content = "\n".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in content
+
+def _try_parse_json(text: str) -> Optional[Any]:
+    """Return parsed JSON if `text` looks like a JSON document, else None."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "[{":
+        return None
+    try:
+        return json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
+
+
+def _looks_like_tavily(parsed: Any) -> bool:
+    """Heuristic: a non-empty list of dicts with at least title/url/content keys."""
+    return (
+        isinstance(parsed, list)
+        and bool(parsed)
+        and all(isinstance(x, dict) for x in parsed)
+        and all({"title", "url", "content"}.issubset(x.keys()) for x in parsed)
+    )
+
+
+def _render_tavily_results(results: List[dict]) -> Group:
+    """Render a list of Tavily search-result dicts as stacked rich panels."""
+    panels = []
+    for i, item in enumerate(results, start=1):
+        title = item.get("title") or "(untitled)"
+        url = item.get("url") or ""
+        score = item.get("score")
+        snippet = item.get("content") or ""
+
+        header = Text()
+        header.append(f"{i}. {title}\n", style="bold")
+        if url:
+            header.append(url, style=f"link {url} blue underline")
+        if score is not None:
+            try:
+                header.append(f"   (score: {float(score):.4f})", style="dim")
+            except (TypeError, ValueError):
+                header.append(f"   (score: {score})", style="dim")
+
+        panels.append(
+            Panel(
+                Group(header, Text(""), Markdown(snippet)),
+                border_style="dim",
+                padding=(0, 1),
             )
-        body_parts.append(str(content))
+        )
+    return Group(*panels)
 
+
+def print_message(message) -> None:
+    """Render a LangChain message (Human/AI/Tool) to the console."""
+    title = _message_title(message)
+    msg_type = getattr(message, "type", "")
+    raw_content = _normalize_content(getattr(message, "content", ""))
     tool_calls = getattr(message, "tool_calls", None)
-    if tool_calls:
-        body_parts.append("[bold]Tool calls:[/bold]")
-        for call in tool_calls:
-            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "?")
-            args = call.get("args") if isinstance(call, dict) else getattr(call, "args", {})
-            body_parts.append(f"  - {name}({args})")
-
-    body = "\n".join(body_parts) if body_parts else "[dim](empty)[/dim]"
 
     if tool_calls:
-        console.print(Panel.fit(Json(tool_calls), title="Tool Calls", border_style="cyan"))
-    else:
-        console.print(Panel.fit(Markdown(body), title=title, border_style="cyan"))
+        console.print(
+            Panel.fit(
+                JSON.from_data(tool_calls),
+                title=f"{title} - tool calls",
+                border_style="cyan",
+            )
+        )
+        return
+
+    if msg_type == "tool":
+        parsed = _try_parse_json(raw_content)
+        if _looks_like_tavily(parsed):
+            console.print(
+                Panel(
+                    _render_tavily_results(parsed),
+                    title=f"{title} - {len(parsed)} result(s)",
+                    border_style="yellow",
+                )
+            )
+            return
+        if parsed is not None:
+            console.print(
+                Panel(JSON.from_data(parsed), title=title, border_style="yellow")
+            )
+            return
+
+    body = raw_content if raw_content else "[dim](empty)[/dim]"
+    console.print(Panel.fit(Markdown(body), title=title, border_style="cyan"))
 
 
 # --- Run a Query ---
