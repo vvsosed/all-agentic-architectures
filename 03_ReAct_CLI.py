@@ -25,6 +25,12 @@ Run examples:
     # Interactive REPL with the ReAct agent
     python 03_ReAct_CLI.py --interactive
 
+    # Just print the workflow graphs of both agents (no LLM calls run)
+    python 03_ReAct_CLI.py --show-graphs
+
+    # Print graphs and then run a query with the ReAct agent
+    python 03_ReAct_CLI.py --show-graphs "Latest SpaceX launch?"
+
 Required environment variables (loaded from a local .env file if present):
     GOOGLE_API_KEY   - Google Gemini API key
     TAVILY_API_KEY   - Tavily search API key
@@ -51,6 +57,7 @@ from rich.json import JSON
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.syntax import Syntax
 from rich.text import Text
 
 console = Console()
@@ -421,6 +428,58 @@ def render_evaluation(label: str, evaluation: TaskEvaluation) -> None:
     )
 
 
+# --- Graph Visualisation ---
+def _render_one_graph(label: str, app, border_style: str) -> None:
+    """Render a single compiled LangGraph app to the console.
+
+    Always prints the Mermaid source (zero extra dependencies, copy-pasteable
+    into any Mermaid renderer). Additionally tries an ASCII rendering, which
+    requires the optional `grandalf` package - if it is not installed, the
+    Mermaid block is shown alone with a short note.
+    """
+    console.print(
+        Rule(f"[bold {border_style}]{label} - Workflow Graph[/bold {border_style}]",
+             style=border_style)
+    )
+    graph = app.get_graph()
+
+    try:
+        ascii_art = graph.draw_ascii()
+        console.print(
+            Panel(
+                Text(ascii_art, no_wrap=True),
+                title=f"{label} - ASCII",
+                border_style=border_style,
+            )
+        )
+    except ImportError:
+        console.print(
+            "[dim]ASCII rendering unavailable (install `grandalf` to enable: "
+            "`pip install grandalf`).[/dim]"
+        )
+    except Exception as exc:
+        console.print(f"[dim]ASCII rendering failed: {exc}[/dim]")
+
+    try:
+        mermaid_src = graph.draw_mermaid()
+        console.print(
+            Panel(
+                Syntax(mermaid_src, "mermaid", theme="ansi_dark", word_wrap=True),
+                title=f"{label} - Mermaid",
+                border_style=border_style,
+            )
+        )
+    except Exception as exc:
+        console.print(f"[red]Mermaid rendering failed: {exc}[/red]")
+
+
+def render_agent_graphs(basic_app, react_app) -> None:
+    """Render both the basic and ReAct agent graphs side by side."""
+    _render_one_graph("BASIC AGENT", basic_app, border_style="red")
+    console.print()
+    _render_one_graph("REACT AGENT", react_app, border_style="green")
+
+
 # --- High-level Orchestration ---
 def run_mode(
     mode: str,
@@ -514,6 +573,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Enable LangSmith tracing (requires LANGCHAIN_API_KEY).",
     )
+    parser.add_argument(
+        "-g",
+        "--show-graphs",
+        action="store_true",
+        help=(
+            "Print the workflow graph of BOTH agents (basic and ReAct) to the "
+            "console as ASCII (if `grandalf` is installed) and Mermaid source. "
+            "Can be combined with a query; if used alone, the demo query is "
+            "NOT auto-run."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -544,8 +614,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     basic_app = build_basic_agent_app(llm, search_tool)
     react_app = build_react_agent_app(llm, search_tool)
 
+    if args.show_graphs:
+        render_agent_graphs(basic_app, react_app)
+
     initial_query = _resolve_initial_query(args)
-    if not initial_query and not args.interactive:
+    if not initial_query and not args.interactive and not args.show_graphs:
         console.print(
             f"[yellow]No query provided; using built-in demo query:[/yellow]\n"
             f"  {DEFAULT_MULTI_STEP_QUERY}\n"
