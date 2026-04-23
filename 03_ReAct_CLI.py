@@ -40,7 +40,6 @@ Required environment variables (loaded from a local .env file if present):
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from typing import Annotated, Any, List, Optional, TypedDict
@@ -52,13 +51,14 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import AnyMessage, add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import BaseModel, Field
-from rich.console import Console, Group
-from rich.json import JSON
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
+
+from utils import extract_text, print_message
 
 console = Console()
 
@@ -215,111 +215,6 @@ def build_react_agent_app(llm: ChatGoogleGenerativeAI, search_tool: TavilySearch
     return builder.compile()
 
 
-# --- Pretty Printing ---
-def _message_title(message) -> str:
-    """Return a human-readable title for a LangChain message."""
-    cls = type(message).__name__
-    return f"{cls} ({getattr(message, 'type', '?')})"
-
-
-def _normalize_content(content: Any) -> str:
-    """Flatten LangChain message content (str or list of blocks) into plain text."""
-    if isinstance(content, list):
-        return "\n".join(
-            block.get("text", "") if isinstance(block, dict) else str(block)
-            for block in content
-        )
-    return "" if content is None else str(content)
-
-
-def _try_parse_json(text: str) -> Optional[Any]:
-    """Return parsed JSON if `text` looks like a JSON document, else None."""
-    stripped = text.strip()
-    if not stripped or stripped[0] not in "[{":
-        return None
-    try:
-        return json.loads(stripped)
-    except (ValueError, TypeError):
-        return None
-
-
-def _looks_like_tavily(parsed: Any) -> bool:
-    """Heuristic: a non-empty list of dicts with at least title/url/content keys."""
-    return (
-        isinstance(parsed, list)
-        and bool(parsed)
-        and all(isinstance(x, dict) for x in parsed)
-        and all({"title", "url", "content"}.issubset(x.keys()) for x in parsed)
-    )
-
-
-def _render_tavily_results(results: List[dict]) -> Group:
-    """Render a list of Tavily search-result dicts as stacked rich panels."""
-    panels = []
-    for i, item in enumerate(results, start=1):
-        title = item.get("title") or "(untitled)"
-        url = item.get("url") or ""
-        score = item.get("score")
-        snippet = item.get("content") or ""
-
-        header = Text()
-        header.append(f"{i}. {title}\n", style="bold")
-        if url:
-            header.append(url, style=f"link {url} blue underline")
-        if score is not None:
-            try:
-                header.append(f"   (score: {float(score):.4f})", style="dim")
-            except (TypeError, ValueError):
-                header.append(f"   (score: {score})", style="dim")
-
-        panels.append(
-            Panel(
-                Group(header, Text(""), Markdown(snippet)),
-                border_style="dim",
-                padding=(0, 1),
-            )
-        )
-    return Group(*panels)
-
-
-def print_message(message) -> None:
-    """Render a LangChain message (Human/AI/Tool) to the console."""
-    title = _message_title(message)
-    msg_type = getattr(message, "type", "")
-    raw_content = _normalize_content(getattr(message, "content", ""))
-    tool_calls = getattr(message, "tool_calls", None)
-
-    if tool_calls:
-        console.print(
-            Panel.fit(
-                JSON.from_data(tool_calls),
-                title=f"{title} - tool calls",
-                border_style="cyan",
-            )
-        )
-        return
-
-    if msg_type == "tool":
-        parsed = _try_parse_json(raw_content)
-        if _looks_like_tavily(parsed):
-            console.print(
-                Panel(
-                    _render_tavily_results(parsed),
-                    title=f"{title} - {len(parsed)} result(s)",
-                    border_style="yellow",
-                )
-            )
-            return
-        if parsed is not None:
-            console.print(
-                Panel(JSON.from_data(parsed), title=title, border_style="yellow")
-            )
-            return
-
-    body = raw_content if raw_content else "[dim](empty)[/dim]"
-    console.print(Panel.fit(Markdown(body), title=title, border_style="cyan"))
-
-
 # --- Run a Query ---
 def run_agent(app, user_query: str, label: str, label_style: str) -> dict:
     """Stream the given agent over a single query and return its final state."""
@@ -358,11 +253,11 @@ def _find_final_answer_message(messages: list) -> Optional[Any]:
     for message in reversed(messages):
         if getattr(message, "type", "") != "ai":
             continue
-        if getattr(message, "tool_calls", None) and not _normalize_content(
+        if getattr(message, "tool_calls", None) and not extract_text(
             getattr(message, "content", "")
         ).strip():
             continue
-        if _normalize_content(getattr(message, "content", "")).strip():
+        if extract_text(getattr(message, "content", "")).strip():
             return message
     return None
 
@@ -389,7 +284,7 @@ def render_final_answer(final_state: dict, label: str, border_style: str) -> Non
         )
         return
 
-    content = _normalize_content(getattr(answer_msg, "content", ""))
+    content = extract_text(getattr(answer_msg, "content", ""))
     console.print()
     console.print(
         Panel(Markdown(content), title=f"{label} - Final Answer", border_style=border_style)
@@ -401,7 +296,7 @@ def evaluate_trace(llm: ChatGoogleGenerativeAI, query: str, final_state: dict) -
     """Run the LLM-as-a-judge evaluation on the conversation trace."""
     judge_llm = llm.with_structured_output(TaskEvaluation)
     trace = "\n".join(
-        f"{m.type}: {_normalize_content(getattr(m, 'content', ''))} "
+        f"{m.type}: {extract_text(getattr(m, 'content', ''))} "
         f"{getattr(m, 'tool_calls', '') or ''}"
         for m in final_state.get("messages", [])
     )
